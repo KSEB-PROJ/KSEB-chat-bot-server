@@ -1,7 +1,7 @@
 [project]
 name = "ksebj-chat-bot-server"
 version = "0.1.0"
-description = ""
+description = "AI Chatbot Server for Collaboration Tool"
 authors = [
     {name = "JaeHyunAn",email = "98042706+yyuneu@users.noreply.github.com"}
 ]
@@ -15,7 +15,10 @@ dependencies = [
     "langchain (>=0.3.27,<0.4.0)",
     "openai (>=1.97.1,<2.0.0)",
     "python-docx (>=1.2.0,<2.0.0)",
-    "python-pptx (>=1.0.2,<2.0.0)"
+    "python-pptx (>=1.0.2,<2.0.0)",
+    "pydantic-settings (>=2.10.1,<3.0.0)",
+    "python-jose[cryptography] (>=3.5.0,<4.0.0)",
+    "langchain-openai (>=0.3.28,<0.4.0)"
 ]
 
 [tool.poetry]
@@ -25,3 +28,8 @@ packages = [{include = "ksebj_chat_bot_server", from = "src"}]
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+# --- 아래 내용을 추가 ---
+[tool.pylint.MASTER]
+# 런타임에 src 폴더를 맨 앞에 껴 넣어 줍니다
+init-hook = "import sys; sys.path.insert(0, 'src')"
