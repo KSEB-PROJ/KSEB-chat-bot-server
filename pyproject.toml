@@ -1,0 +1,27 @@
+[project]
+name = "ksebj-chat-bot-server"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "JaeHyunAn",email = "98042706+yyuneu@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11, <4.0"
+dependencies = [
+    "fastapi (>=0.116.1,<0.117.0)",
+    "uvicorn[standard] (>=0.35.0,<0.36.0)",
+    "python-dotenv (>=1.1.1,<2.0.0)",
+    "httpx (>=0.28.1,<0.29.0)",
+    "langchain (>=0.3.27,<0.4.0)",
+    "openai (>=1.97.1,<2.0.0)",
+    "python-docx (>=1.2.0,<2.0.0)",
+    "python-pptx (>=1.0.2,<2.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "ksebj_chat_bot_server", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
