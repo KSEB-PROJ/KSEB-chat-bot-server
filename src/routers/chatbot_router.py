@@ -18,23 +18,27 @@ router = APIRouter(prefix="/api/v1/chatbot", tags=["Chatbot"])
 async def handle_chat_query(
     channel_id: int,
     request: ChatRequest,
+    http_request: Request,         # 반드시 Depends보다 앞에 위치!
     user_id: int = Depends(get_current_user_id),
-    http_request: Request = None,  # FastAPI의 Request 객체로 헤더 접근
 ):
     """
     사용자의 질문을 받아 AI 에이전트를 실행하고, 생성된 답변을 반환하는 API 엔드포인트.
     """
     try:
-        # JWT 토큰을 Authorization 헤더에서 추출 (Bearer 포함)
+        # JWT 토큰을 Authorization 헤더에서 추출 ("Bearer ..."에서 Bearer 떼기)
         jwt_token = None
         if http_request is not None:
-            jwt_token = http_request.headers.get("authorization")  # 보통 'Bearer ...'
+            raw_token = http_request.headers.get("authorization")
+            if raw_token and raw_token.lower().startswith("bearer "):
+                jwt_token = raw_token[7:]  # 'Bearer ' prefix 잘라냄
+            else:
+                jwt_token = raw_token
 
         answer = await run_agent(
             query=request.query,
             user_id=user_id,
             channel_id=channel_id,
-            jwt_token=jwt_token,  # 서비스에 넘김
+            jwt_token=jwt_token,  # Bearer 없는 진짜 토큰만 서비스에 넘김
         )
         return ChatResponse(answer=answer)
     except Exception as e:

@@ -34,28 +34,31 @@ async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: 
     """[내부 함수] 메인 서버 API를 호출하여 채널의 전체 대화 내역을 가져옴."""
     api_url = f"/api/channels/{channel_id}/chats"
     headers = {
-        "X-User-ID": str(user_id),
-        "Authorization": jwt_token,
+        "Authorization": f"Bearer {jwt_token}",
+        "X-User-ID": str(user_id)  # <-- 이 줄을 추가해주세요!
     }
+    print(f"[fetch_messages_from_backend] 호출! url: {api_url}")
+    print(f"[fetch_messages_from_backend] headers: {headers}")
     try:
-        response = await client.get(api_url, headers=headers)
+        response = await client.get(api_url, headers=headers, timeout=5.0)
+        print(f"[fetch_messages_from_backend] 응답 status: {response.status_code}")
         response.raise_for_status()
         messages = response.json().get("data", [])
         if not messages:
+            print("[fetch_messages_from_backend] 대화 내역 없음")
             return ""
-        # AI가 시간 필터링을 더 잘 할 수 있도록 날짜까지 포함하여 포맷팅
+        print(f"[fetch_messages_from_backend] messages 개수: {len(messages)}")
         return "\n".join(
             f"[{datetime.fromisoformat(msg['createdAt']).strftime('%Y-%m-%d %H:%M')}] "
             f"{msg['userName']}: {msg.get('content') or '(파일)'}"
             for msg in messages
         )
     except httpx.HTTPStatusError as e:
-        print(f"메인 서버 API 오류: {e.response.status_code}")
+        print(f"[fetch_messages_from_backend] 메인 서버 API 오류: {e.response.status_code} {e.response.text}")
         raise ValueError("대화 내용을 가져오는 데 실패했습니다.") from e
     except Exception as e:
-        print(f"메시지 조회 중 알 수 없는 오류 발생: {e}")
+        print(f"[fetch_messages_from_backend] 메시지 조회 중 알 수 없는 오류 발생: {e}")
         raise ValueError("대화 내용을 가져오는 중 문제가 발생했습니다.") from e
-
 
 # --- LangChain 도구(Tools) 정의 ---
 @tool
@@ -74,7 +77,7 @@ async def create_schedule(title: str, start_time: str, end_time: str, user_id: i
             },
             headers={
                 "X-User-ID": str(user_id),
-                "Authorization": jwt_token,
+                "Authorization": f"Bearer {jwt_token}"
             },
         )
         response.raise_for_status()
@@ -95,7 +98,7 @@ async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
             "/api/users/me/events",
             headers={
                 "X-User-ID": str(user_id),
-                "Authorization": jwt_token,
+                "Authorization": f"Bearer {jwt_token}"
             }
         )
         response.raise_for_status()
@@ -208,7 +211,10 @@ prompt = ChatPromptTemplate.from_messages(
                 "각 도구 설명을 참고하여 사용자의 의도를 가장 잘 만족시킬 수 있는 Tool만 사용하세요.\n"
                 "가능하면 답변은 친절하지만 간결하게, 최종 결과만 명확하게 전달하세요.\n"
                 "대답이 표 형식이나 마크다운 등으로 보기 쉽게 나오면 더 좋습니다.\n"
-                "현재 사용자의 ID: {user_id}, 채널 ID: {channel_id}\n"
+                # 아래 라인들에 jwt_token 정보를 추가합니다.
+                "현재 사용자의 ID: {user_id}\n"
+                "현재 채널 ID: {channel_id}\n"
+                "현재 사용자 토큰: {jwt_token}\n" # <-- 이 줄을 추가해주세요!
                 f"오늘 날짜: {today_str}\n"
                 "\n"
                 "예시)\n"
@@ -229,10 +235,12 @@ agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -> str:
     """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
+    # summarize_channel_conversations 도구에 실제 jwt_token이 전달되도록 수정
+    # 'user_jwt_token'이라는 문자열 대신, 함수 인자로 받은 실제 토큰을 전달합니다.
     result = await agent_executor.ainvoke({
         "input": query,
         "user_id": user_id,
         "channel_id": channel_id,
-        "jwt_token": jwt_token,
+        "jwt_token": jwt_token,  # ★★★ 이 부분을 수정합니다! ★★★
     })
     return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")

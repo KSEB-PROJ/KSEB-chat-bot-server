@@ -16,12 +16,11 @@ app = FastAPI(
 # CORS 미들웨어 설정 (모든 출처 허용 - 개발 환경)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # API 라우터 등록
 app.include_router(chatbot_router.router)
 
