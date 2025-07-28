@@ -1,6 +1,6 @@
 """
 챗봇 서버의 메인 진입점(Entrypoint) 파일.
-FastAPI 애플리케이션을 생성하고 라우터와 미들웨어를 설정합니다.
+FastAPI 애플리케이션을 생성하고 라우터와 미들웨어를 설정.
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

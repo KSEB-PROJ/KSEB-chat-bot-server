@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     이 클래스는 .env 파일 또는 시스템 환경 변수에서 
     각종 API 키, 서버 주소, JWT 시크릿, 모델명 등을 자동으로 읽어서
-    서비스 전체에서 사용할 수 있도록 제공한다.
+    서비스 전체에서 사용할 수 있도록 제공.
     """
     OPENAI_API_KEY: str
     MAIN_SERVER_URL: str = "http://localhost:8080"
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4.1"
 
     class Config:
+        """Pydantic-settings의 동작을 구성하는 내부 클래스."""
         env_file = ".env"
         env_file_encoding = 'utf-8'
 

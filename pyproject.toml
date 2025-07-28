@@ -35,4 +35,4 @@ build-backend = "poetry.core.masonry.api"
 init-hook = "import sys; sys.path.insert(0, 'src')"
 
 [tool.pylint.format]
-max-line-length = 120
+max-line-length = 200

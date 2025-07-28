@@ -18,7 +18,7 @@ from src.core.config import settings
 # HTTP 클라이언트는 재사용하는 것이 효율적이므로 모듈 수준에서 정의.
 client = httpx.AsyncClient(base_url=settings.MAIN_SERVER_URL)
 
-# ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달합니다.
+# ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달.
 llm = ChatOpenAI(
     model=settings.OPENAI_MODEL,
     temperature=0,
@@ -35,7 +35,7 @@ async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: 
     api_url = f"/api/channels/{channel_id}/chats"
     headers = {
         "Authorization": f"Bearer {jwt_token}",
-        "X-User-ID": str(user_id)  # <-- 이 줄을 추가해주세요!
+        "X-User-ID": str(user_id)
     }
     print(f"[fetch_messages_from_backend] 호출! url: {api_url}")
     print(f"[fetch_messages_from_backend] headers: {headers}")
@@ -211,10 +211,9 @@ prompt = ChatPromptTemplate.from_messages(
                 "각 도구 설명을 참고하여 사용자의 의도를 가장 잘 만족시킬 수 있는 Tool만 사용하세요.\n"
                 "가능하면 답변은 친절하지만 간결하게, 최종 결과만 명확하게 전달하세요.\n"
                 "대답이 표 형식이나 마크다운 등으로 보기 쉽게 나오면 더 좋습니다.\n"
-                # 아래 라인들에 jwt_token 정보를 추가합니다.
                 "현재 사용자의 ID: {user_id}\n"
                 "현재 채널 ID: {channel_id}\n"
-                "현재 사용자 토큰: {jwt_token}\n" # <-- 이 줄을 추가해주세요!
+                "현재 사용자 토큰: {jwt_token}\n" # <-- 여기 토큰 안들어가면 오류
                 f"오늘 날짜: {today_str}\n"
                 "\n"
                 "예시)\n"
@@ -236,11 +235,11 @@ agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -> str:
     """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
     # summarize_channel_conversations 도구에 실제 jwt_token이 전달되도록 수정
-    # 'user_jwt_token'이라는 문자열 대신, 함수 인자로 받은 실제 토큰을 전달합니다.
+    # 'user_jwt_token'이라는 문자열 대신, 함수 인자로 받은 실제 토큰 전달.
     result = await agent_executor.ainvoke({
         "input": query,
         "user_id": user_id,
         "channel_id": channel_id,
-        "jwt_token": jwt_token,  # ★★★ 이 부분을 수정합니다! ★★★
+        "jwt_token": jwt_token,
     })
     return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
