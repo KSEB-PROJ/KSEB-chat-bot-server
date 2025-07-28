@@ -33,3 +33,6 @@ build-backend = "poetry.core.masonry.api"
 [tool.pylint.MASTER]
 # 런타임에 src 폴더를 맨 앞에 껴 넣어 줍니다
 init-hook = "import sys; sys.path.insert(0, 'src')"
+
+[tool.pylint.format]
+max-line-length = 120
