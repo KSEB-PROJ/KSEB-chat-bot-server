@@ -4,6 +4,7 @@
 """
 
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 class Settings(BaseSettings):
     """
@@ -19,7 +20,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     OPENAI_API_BASE_URL: str
     OPENAI_MODEL: str = "gpt-4.1"
-    tavily_api_key: str  # 필드명은 소문자 언더스코어!
+    GOOGLE_API_KEY: str
+    GOOGLE_CSE_ID: str
+    SEMANTIC_SCHOLAR_API_KEY: Optional[str] = None
 
     class Config:
         """Pydantic-settings의 동작을 구성하는 내부 클래스."""
