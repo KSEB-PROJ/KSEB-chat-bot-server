@@ -1,3 +1,4 @@
+
 """
 LangChain을 사용하여 AI 에이전트를 생성하고,
 챗봇의 핵심 로직을 처리하는 서비스 모듈.
@@ -11,9 +12,13 @@ from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_community.callbacks import get_openai_callback
 
 # 로컬 애플리케이션 라이브러리
 from src.core.config import settings
+from src.agent.tools.web_search_tool import DeepSearchTool
+from src.agent.tools.arxiv_tool import AdvancedArxivTool
+from src.agent.tools.semantic_scholar_tool import SemanticScholarTool
 
 # HTTP 클라이언트는 재사용하는 것이 효율적이므로 모듈 수준에서 정의.
 client = httpx.AsyncClient(base_url=settings.MAIN_SERVER_URL)
@@ -37,17 +42,12 @@ async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: 
         "Authorization": f"Bearer {jwt_token}",
         "X-User-ID": str(user_id)
     }
-    print(f"[fetch_messages_from_backend] 호출! url: {api_url}")
-    print(f"[fetch_messages_from_backend] headers: {headers}")
     try:
         response = await client.get(api_url, headers=headers, timeout=5.0)
-        print(f"[fetch_messages_from_backend] 응답 status: {response.status_code}")
         response.raise_for_status()
         messages = response.json().get("data", [])
         if not messages:
-            print("[fetch_messages_from_backend] 대화 내역 없음")
             return ""
-        print(f"[fetch_messages_from_backend] messages 개수: {len(messages)}")
         return "\n".join(
             f"[{datetime.fromisoformat(msg['createdAt']).strftime('%Y-%m-%d %H:%M')}] "
             f"{msg['userName']}: {msg.get('content') or '(파일)'}"
@@ -127,20 +127,13 @@ async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
 
 @tool
 async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_token: str, time_query: str = "all") -> str:
-    """
-    채널의 대화 내용을 요약. '회의 요약해줘', '대화 정리해줘' 등과 같이 말할 때 사용.
-    - user_id: 현재 사용자 ID (필수)
-    - channel_id: 현재 보고 있는 채널의 ID (필수)
-    - jwt_token: 현재 유저의 JWT 토큰(반드시 스프링 서버와 동기화된 토큰)
-    - time_query: '오늘 오후 2시', '어제 회의' 와 같이 요약할 시간대를 나타내는 자연어. 사용자가 시간을 언급하지 않으면 'all'을 사용.
-    """
+    """채널의 대화 내용을 요약. '회의 요약해줘', '대화 정리해줘' 등과 같이 말할 때 사용."""
     print(f"Executing summary for user {user_id} in channel {channel_id} with time_query: '{time_query}'")
     full_conversation = await fetch_messages_from_backend(channel_id, user_id, jwt_token)
     if not full_conversation:
         return "요약할 대화 내용이 없습니다."
 
     conversation_to_summarize = full_conversation
-    # 사용자가 특정 시간을 요청한 경우, AI를 이용해 해당 부분만 필터링
     if time_query != "all":
         filtering_prompt = ChatPromptTemplate.from_messages([
             (
@@ -198,48 +191,91 @@ async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_tok
 
 
 # --- LangChain 에이전트 설정 ---
-tools = [create_schedule, get_schedule, summarize_channel_conversations]
+tools = [
+    create_schedule,
+    get_schedule,
+    summarize_channel_conversations,
+    DeepSearchTool(),
+    AdvancedArxivTool(),
+    SemanticScholarTool()
+]
 
 prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             (
-                "당신은 대학생 협업툴의 AI 어시스턴트입니다. 사용자의 자연어 요청에 맞춰 "
-                "아래의 도구(Tool)를 조합하여 일정관리, 회의 대화 요약, 일정 조회 등 다양한 업무를 자동화해줍니다.\n"
-                "모든 기능 실행시 반드시 'user_id', 'channel_id', 'jwt_token'을 정확하게 전달해야 합니다.\n"
-                "각 도구 설명을 참고하여 사용자의 의도를 가장 잘 만족시킬 수 있는 Tool만 사용하세요.\n"
-                "가능하면 답변은 친절하지만 간결하게, 최종 결과만 명확하게 전달하세요.\n"
-                "대답이 표 형식이나 마크다운 등으로 보기 쉽게 나오면 더 좋습니다.\n"
+                "당신은 **'KSEB 협업툴 전문 에이전트'**입니다.\n"
+                "당신의 유일한 임무는 사용자의 요청을 분석하여, 아래에 명시된 '사용 가능한 도구' 중 가장 적합한 것 하나를 찾아 실행하는 것입니다.\n"
+                "\n"
+                "### **절대 원칙 (Absolute Rules)**\n"
+                "1.  **절대로, 어떤 상황에서도 도구를 사용하지 않고 직접 답변을 생성해서는 안 됩니다.**\n"
+                "2.  모든 사용자의 요청은 반드시 도구를 통해서만 처리해야 합니다.\n"
+                "3.  **최우선 원칙:** 도구가 오류 없이 유의미한 결과(작업 로그 포함)를 반환했다면, 그것이 최선의 결과라고 믿고 **그 내용을 수정 없이 그대로 사용자에게 전달해야 합니다.**\n"
+                "4.  만약 사용자의 요청을 처리할 수 있는 적절한 도구가 없다면, 반드시 '죄송합니다. 해당 기능은 지원하지 않습니다.' 라고만 답변해야 합니다.\n"
+                "\n"
+                "### **도구 선택 전략 (Tool Selection Strategy)**\n"
+                "- **1순위 (기술/과학):** 질문이 컴퓨터 과학, AI, 물리, 수학 등 명확한 STEM 분야에 해당하면 `advanced_arxiv_search`를 먼저 사용하세요.\n"
+                "- **2순위 (사회과학/인문학/일반):** 질문이 심리학, 사회학, 교육학 등 비-STEM 분야이거나, `advanced_arxiv_search`로 결과를 찾지 못했을 경우, `semantic_scholar_search`를 사용하세요.\n"
+                "- **3순위 (웹 정보):** 위 두 가지 학술 검색으로도 답을 찾을 수 없거나, 최신 뉴스/트렌드에 대한 질문일 경우에만 `deep_search`를 사용하세요.\n"
+                "\n"
+                "### **사용 가능한 도구**\n"
+                "- `create_schedule`: '일정 추가해줘', '미팅 잡아줘' 등 새로운 일정을 생성할 때 사용합니다.\n"
+                "- `get_schedule`: '오늘 내 일정 보여줘', '내일 뭐 있지?' 등 특정 날짜의 일정을 조회할 때 사용합니다.\n"
+                "- `summarize_channel_conversations`: '회의 내용 요약해줘', '채팅 정리해줘' 등 채널의 대화 내용을 요약할 때 사용합니다.\n"
+                "- `deep_search`: 일반적인 웹 검색이 필요할 때 사용합니다.\n"
+                "- `advanced_arxiv_search`: 컴퓨터 과학, AI 등 STEM 분야의 전문 논문을 심층 분석할 때 사용합니다.\n"
+                "- `semantic_scholar_search`: 심리학, 사회과학 등 모든 학문 분야의 논문을 검색하고 분석할 때 사용합니다.\n"
+                "\n"
+                "--- \n"
+                f"오늘 날짜: {today_str}\n"
                 "현재 사용자의 ID: {user_id}\n"
                 "현재 채널 ID: {channel_id}\n"
-                "현재 사용자 토큰: {jwt_token}\n" # <-- 여기 토큰 안들어가면 오류
-                f"오늘 날짜: {today_str}\n"
-                "\n"
-                "예시)\n"
-                "- '오늘 일정 알려줘' => get_schedule\n"
-                "- '내일 오후 2시에 미팅 잡아줘' => create_schedule\n"
-                "- '어제 회의 요약해줘' => summarize_channel_conversations (time_query: '어제')\n"
-                "\n"
-                "반드시 적절한 도구를 사용해서 답을 생성하세요."
+                "현재 사용자 토큰: {jwt_token}\n"
             ),
         ),
         ("human", "{input}"),
+        # 에이전트의 이전 작업 기록을 전달하는 플레이스홀더.
         ("placeholder", "{agent_scratchpad}"),
     ]
 )
 
+
 agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=10,
+)
 
 async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -> str:
     """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
-    # summarize_channel_conversations 도구에 실제 jwt_token이 전달되도록 수정
-    # 'user_jwt_token'이라는 문자열 대신, 함수 인자로 받은 실제 토큰 전달.
-    result = await agent_executor.ainvoke({
-        "input": query,
-        "user_id": user_id,
-        "channel_id": channel_id,
-        "jwt_token": jwt_token,
-    })
-    return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+    try:
+        with get_openai_callback() as cb:
+            result = await agent_executor.ainvoke({
+                "input": query,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "jwt_token": jwt_token,
+                # 무한 루프 방지를 위해 에이전트의 작업 기록(scratchpad)을 전달.
+                "agent_scratchpad": []
+            })
+
+            # 콜백 객체(cb)에 기록된 토큰 정보를 출력.
+            print("\n" + "="*40)
+            print("Token Usage Details:")
+            print(f"  - Total Tokens: {cb.total_tokens}")
+            print(f"  - Prompt Tokens: {cb.prompt_tokens}")
+            print(f"  - Completion Tokens: {cb.completion_tokens}")
+            print(f"  - Total Cost (USD): ${cb.total_cost:.6f}")
+            print("="*40 + "\n")
+            
+        return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+    # 에이전트 실행의 마지막 안전망으로, 모든 예외를 처리하여 서버가 중단되지 않게 함.
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"에이전트 실행 중 오류 발생: {e}")
+        return "죄송합니다, 요청을 처리하는 중에 예상치 못한 오류가 발생했습니다. 질문을 조금 더 구체적으로 바꿔서 다시 시도해 주시겠어요?"
+    

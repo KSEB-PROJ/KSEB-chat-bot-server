@@ -4,12 +4,13 @@
 """
 
 from pydantic_settings import BaseSettings
+from typing import Optional
 
 class Settings(BaseSettings):
     """
     애플리케이션 환경 변수 설정을 관리하는 클래스.
 
-    이 클래스는 .env 파일 또는 시스템 환경 변수에서 
+    이 클래스는 .env 파일 또는 시스템 환경 변수에서
     각종 API 키, 서버 주소, JWT 시크릿, 모델명 등을 자동으로 읽어서
     서비스 전체에서 사용할 수 있도록 제공.
     """
@@ -19,6 +20,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str
     OPENAI_API_BASE_URL: str
     OPENAI_MODEL: str = "gpt-4.1"
+    GOOGLE_API_KEY: str
+    GOOGLE_CSE_ID: str
+    SEMANTIC_SCHOLAR_API_KEY: Optional[str] = None
 
     class Config:
         """Pydantic-settings의 동작을 구성하는 내부 클래스."""
