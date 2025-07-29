@@ -1,70 +1,50 @@
 """
-LangChain을 사용하여 AI 에이전트를 생성하고,
-챗봇의 핵심 로직을 처리하는 서비스 모듈.
+LangChain 기반 AI 챗봇 서비스 통합 모듈 (일정, 요약, 검색/리서치 모두 포함)
 """
-# 표준 라이브러리
-from datetime import datetime
 
-# 서드파티 라이브러리
+from datetime import datetime
+from typing import List
 import httpx
+
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-# 로컬 애플리케이션 라이브러리
 from src.core.config import settings
+from src.agent.tools.web_search import advanced_web_search, refine_search_query
+from src.agent.tools.web_reader import read_web_page
 
-# HTTP 클라이언트는 재사용하는 것이 효율적이므로 모듈 수준에서 정의.
-client = httpx.AsyncClient(base_url=settings.MAIN_SERVER_URL)
-
-# ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달.
+# --- 글로벌 객체 한 번만 선언 ---
 llm = ChatOpenAI(
     model=settings.OPENAI_MODEL,
     temperature=0,
     api_key=settings.OPENAI_API_KEY
 )
 
-# 오늘 날짜를 문자열로 저장 (프롬프트에 동적으로 사용)
-today_str = datetime.now().strftime('%Y-%m-%d %A')
+main_prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        (
+            "당신은 **최고의 AI 리서처 어시스턴트**입니다. 사용자의 어떤 질문에도 가장 정확하고 깊이 있는 답변을 제공합니다.\n"
+            "일정/대화/요약/스케줄 등은 전문 툴을, 리서치·검색·요약·정보 비교 등은 웹검색/리더를 사용하세요.\n"
+            "---\n"
+            f"오늘 날짜: {datetime.now().strftime('%Y-%m-%d %A')}\n"
+            "현재 사용자의 ID: {user_id}\n"
+            "현재 채널 ID: {channel_id}\n"
+            "현재 사용자 토큰: {jwt_token}\n"
+        ),
+    ),
+    ("human", "{input}"),
+    ("placeholder", "{agent_scratchpad}"),
+])
 
+client = httpx.AsyncClient(base_url=settings.MAIN_SERVER_URL)
 
-# --- 내부 헬퍼 함수 ---
-async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: str) -> str:
-    """[내부 함수] 메인 서버 API를 호출하여 채널의 전체 대화 내역을 가져옴."""
-    api_url = f"/api/channels/{channel_id}/chats"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "X-User-ID": str(user_id)
-    }
-    print(f"[fetch_messages_from_backend] 호출! url: {api_url}")
-    print(f"[fetch_messages_from_backend] headers: {headers}")
-    try:
-        response = await client.get(api_url, headers=headers, timeout=5.0)
-        print(f"[fetch_messages_from_backend] 응답 status: {response.status_code}")
-        response.raise_for_status()
-        messages = response.json().get("data", [])
-        if not messages:
-            print("[fetch_messages_from_backend] 대화 내역 없음")
-            return ""
-        print(f"[fetch_messages_from_backend] messages 개수: {len(messages)}")
-        return "\n".join(
-            f"[{datetime.fromisoformat(msg['createdAt']).strftime('%Y-%m-%d %H:%M')}] "
-            f"{msg['userName']}: {msg.get('content') or '(파일)'}"
-            for msg in messages
-        )
-    except httpx.HTTPStatusError as e:
-        print(f"[fetch_messages_from_backend] 메인 서버 API 오류: {e.response.status_code} {e.response.text}")
-        raise ValueError("대화 내용을 가져오는 데 실패했습니다.") from e
-    except Exception as e:
-        print(f"[fetch_messages_from_backend] 메시지 조회 중 알 수 없는 오류 발생: {e}")
-        raise ValueError("대화 내용을 가져오는 중 문제가 발생했습니다.") from e
-
-# --- LangChain 도구(Tools) 정의 ---
+# --- 일정 관리 툴 ---
 @tool
 async def create_schedule(title: str, start_time: str, end_time: str, user_id: int, jwt_token: str) -> str:
-    """새로운 개인 일정 생성. 사용자가 '일정 추가', '미팅 잡아줘' 등과 같이 말할 때 사용."""
-    print(f"Executing create_schedule for user {user_id}: {title}")
+    """새로운 개인 일정 생성"""
     try:
         response = await client.post(
             "/api/users/me/events",
@@ -88,11 +68,9 @@ async def create_schedule(title: str, start_time: str, end_time: str, user_id: i
     except httpx.RequestError as e:
         return f"서버 통신 오류: {e}"
 
-
 @tool
 async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
-    """특정 날짜의 사용자 일정을 조회. '오늘 일정 알려줘', '내일 스케줄' 등과 같이 말할 때 사용."""
-    print(f"Executing get_schedule for user {user_id} on {date}")
+    """특정 날짜의 사용자 일정을 조회"""
     try:
         response = await client.get(
             "/api/users/me/events",
@@ -124,30 +102,47 @@ async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
     except httpx.RequestError as e:
         return f"서버 통신 오류: {e}"
 
+# --- 대화 요약 툴 ---
+async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: str) -> str:
+    """채널의 전체 대화 내역을 메인 서버 API에서 가져옴"""
+    api_url = f"/api/channels/{channel_id}/chats"
+    headers = {
+        "Authorization": f"Bearer {jwt_token}",
+        "X-User-ID": str(user_id)
+    }
+    try:
+        response = await client.get(api_url, headers=headers, timeout=5.0)
+        response.raise_for_status()
+        messages = response.json().get("data", [])
+        if not messages:
+            return ""
+        return "\n".join(
+            f"[{datetime.fromisoformat(msg['createdAt']).strftime('%Y-%m-%d %H:%M')}] "
+            f"{msg['userName']}: {msg.get('content') or '(파일)'}"
+            for msg in messages
+        )
+    except httpx.HTTPStatusError as e:
+        print(f"[fetch_messages_from_backend] 메인 서버 API 오류: {e.response.status_code} {e.response.text}")
+        raise ValueError("대화 내용을 가져오는 데 실패했습니다.") from e
+    except Exception as e:
+        print(f"[fetch_messages_from_backend] 메시지 조회 중 알 수 없는 오류 발생: {e}")
+        raise ValueError("대화 내용을 가져오는 중 문제가 발생했습니다.") from e
 
 @tool
 async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_token: str, time_query: str = "all") -> str:
-    """
-    채널의 대화 내용을 요약. '회의 요약해줘', '대화 정리해줘' 등과 같이 말할 때 사용.
-    - user_id: 현재 사용자 ID (필수)
-    - channel_id: 현재 보고 있는 채널의 ID (필수)
-    - jwt_token: 현재 유저의 JWT 토큰(반드시 스프링 서버와 동기화된 토큰)
-    - time_query: '오늘 오후 2시', '어제 회의' 와 같이 요약할 시간대를 나타내는 자연어. 사용자가 시간을 언급하지 않으면 'all'을 사용.
-    """
-    print(f"Executing summary for user {user_id} in channel {channel_id} with time_query: '{time_query}'")
+    """채널의 대화 내용을 요약"""
     full_conversation = await fetch_messages_from_backend(channel_id, user_id, jwt_token)
     if not full_conversation:
         return "요약할 대화 내용이 없습니다."
 
     conversation_to_summarize = full_conversation
-    # 사용자가 특정 시간을 요청한 경우, AI를 이용해 해당 부분만 필터링
     if time_query != "all":
         filtering_prompt = ChatPromptTemplate.from_messages([
             (
                 "system",
                 (
                     "당신은 대화 로그에서 시간 조건에 맞는 메시지만 정밀하게 추출하는 전문가입니다.\n"
-                    f"오늘은 {today_str}입니다. 전체 대화 로그는 아래와 같고, 각 행은 '[YYYY-MM-DD HH:MM] 작성자: 내용' 형태입니다.\n"
+                    f"오늘은 {datetime.now().strftime('%Y-%m-%d %A')}입니다. 전체 대화 로그는 아래와 같고, 각 행은 '[YYYY-MM-DD HH:MM] 작성자: 내용' 형태입니다.\n"
                     "사용자가 요청한 시간 조건(time_query)에 맞는 대화만 뽑아서, 원문 그대로 반환하세요.\n"
                     "불필요한 해설, 추가 설명 없이 매칭되는 메시지만 리턴하세요.\n"
                     "만약 매칭되는 메시지가 없다면 'No Match'라고만 적어주세요."
@@ -196,50 +191,94 @@ async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_tok
     summary_report = await summarize_chain.ainvoke({"input": conversation_to_summarize})
     return getattr(summary_report, "content", "요약 보고서 생성에 실패했습니다.")
 
+# --- 심층 리서치 체인 ---
+async def summarize_chunks(chunks: List[str]) -> List[str]:
+    """각 chunk를 LLM이 요약"""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "아래 chunk를 5000자 내외로 표/코드/결론/팩트 위주로 요약해줘."),
+        ("human", "{input}")
+    ])
+    summaries = []
+    for chunk in chunks:
+        summary = await (prompt | llm).ainvoke({"input": chunk})
+        summaries.append(getattr(summary, "content", chunk[:1000]))
+    return summaries
 
-# --- LangChain 에이전트 설정 ---
-tools = [create_schedule, get_schedule, summarize_channel_conversations]
+async def compare_summaries(summaries: List[str], urls: List[str]) -> str:
+    """여러 출처별 요약을 LLM이 비교 분석"""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "아래 여러 출처별 요약을 비교해서, 공통점/차이점/팩트오류/신뢰도 순서로 정리해줘."),
+        ("human", "출처/요약 목록:\n" + "\n\n".join([f"{u}\n{s}" for u, s in zip(urls, summaries)]))
+    ])
+    result = await (prompt | llm).ainvoke({})
+    return getattr(result, "content", "")
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            (
-                "당신은 대학생 협업툴의 AI 어시스턴트입니다. 사용자의 자연어 요청에 맞춰 "
-                "아래의 도구(Tool)를 조합하여 일정관리, 회의 대화 요약, 일정 조회 등 다양한 업무를 자동화해줍니다.\n"
-                "모든 기능 실행시 반드시 'user_id', 'channel_id', 'jwt_token'을 정확하게 전달해야 합니다.\n"
-                "각 도구 설명을 참고하여 사용자의 의도를 가장 잘 만족시킬 수 있는 Tool만 사용하세요.\n"
-                "가능하면 답변은 친절하지만 간결하게, 최종 결과만 명확하게 전달하세요.\n"
-                "대답이 표 형식이나 마크다운 등으로 보기 쉽게 나오면 더 좋습니다.\n"
-                "현재 사용자의 ID: {user_id}\n"
-                "현재 채널 ID: {channel_id}\n"
-                "현재 사용자 토큰: {jwt_token}\n" # <-- 여기 토큰 안들어가면 오류
-                f"오늘 날짜: {today_str}\n"
-                "\n"
-                "예시)\n"
-                "- '오늘 일정 알려줘' => get_schedule\n"
-                "- '내일 오후 2시에 미팅 잡아줘' => create_schedule\n"
-                "- '어제 회의 요약해줘' => summarize_channel_conversations (time_query: '어제')\n"
-                "\n"
-                "반드시 적절한 도구를 사용해서 답을 생성하세요."
-            ),
+async def deep_research(query: str, max_results: int = 3) -> str:
+    """리서치 전용 심층 체인"""
+    refined = await refine_search_query.ainvoke({"query": query})
+    results = await advanced_web_search.ainvoke({"query": refined, "max_results": max_results})
+
+    urls, all_summaries = [], []
+    for r in results:
+        url = r['url']
+        urls.append(url)
+        chunks = await read_web_page.ainvoke({"url": url})
+        summaries = await summarize_chunks(chunks)
+        all_summaries.append(" ".join(summaries))
+    factcheck = await compare_summaries(all_summaries, urls)
+    report_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+            "아래 factcheck_report, 원문 요약 바탕으로, 실무·전문가 관점의 심층 리포트로 작성. "
+            "적용법, 코드, FAQ, 반론, 신뢰도·최신성 구조화. 참고 출처 반드시 포함."
         ),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ]
+        ("human",
+            "질문: {user_query}\n\nFactCheck: {factcheck}\n\n원문 요약:\n{all_summaries}\n"
+        )
+    ])
+    report = await (report_prompt | llm).ainvoke({
+        "user_query": query,
+        "factcheck": factcheck,
+        "all_summaries": "\n\n".join(all_summaries),
+    })
+    return getattr(report, "content", "최종 분석 실패")
+
+# --- 에이전트 세팅 ---
+tools = [
+    create_schedule,
+    get_schedule,
+    summarize_channel_conversations,
+    advanced_web_search,
+    read_web_page
+]
+agent = create_tool_calling_agent(llm, tools, main_prompt)
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=10,
 )
 
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
+# --- 메인 서비스 엔드포인트 ---
 async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -> str:
-    """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
-    # summarize_channel_conversations 도구에 실제 jwt_token이 전달되도록 수정
-    # 'user_jwt_token'이라는 문자열 대신, 함수 인자로 받은 실제 토큰 전달.
-    result = await agent_executor.ainvoke({
-        "input": query,
-        "user_id": user_id,
-        "channel_id": channel_id,
-        "jwt_token": jwt_token,
-    })
-    return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+    """
+    질문 의도/키워드에 따라 자동 분기:
+    일정, 대화, 요약, 스케줄, 회의, 생성, 수정 등은 기존 AgentExecutor,
+    그 외 정보 검색/리서치/분석은 LLM 기반 심층 체인으로 처리.
+    """
+    key = query.lower()
+    if any(word in key for word in ["일정", "대화", "채널", "요약", "스케줄", "미팅", "생성", "수정", "삭제"]):
+        try:
+            result = await agent_executor.ainvoke({
+                "input": query,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "jwt_token": jwt_token,
+                "agent_scratchpad": []
+            })
+            return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            print(f"에이전트 실행 중 오류 발생: {e}")
+            return "죄송합니다, 요청을 처리하는 중에 오류가 발생했습니다."
+    # 검색/리서치/분석류는 LLM 심층 체인으로
+    return await deep_research(query, max_results=3)

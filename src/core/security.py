@@ -28,8 +28,7 @@ def get_current_user_id(
     """
     token = credentials.credentials
     try:
-        secret_for_test = "ThisIsTheFinalTestSecretKeyPleaseWorkNow123"
-        payload = jwt.decode(token, secret_for_test, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[ALGORITHM])
         # 터미널에 로그 출력
         print("--- DECODED JWT PAYLOAD ---")
         print(json.dumps(payload, indent=2))
