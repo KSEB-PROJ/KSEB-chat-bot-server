@@ -4,7 +4,7 @@ FastAPI 애플리케이션을 생성하고 라우터와 미들웨어를 설정.
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from src.routers import chatbot_router
+from src.routers import chatbot_router, download_router
 
 # FastAPI 앱 인스턴스 생성
 app = FastAPI(
@@ -23,6 +23,8 @@ app.add_middleware(
 )
 # API 라우터 등록
 app.include_router(chatbot_router.router)
+app.include_router(download_router.router)
+
 
 @app.get("/")
 async def read_root():

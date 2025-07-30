@@ -16,12 +16,11 @@ from langchain_community.callbacks import get_openai_callback
 
 # 로컬 애플리케이션 라이브러리
 from src.core.config import settings
+from src.utils.api_client import fetch_messages_from_backend, client
 from src.agent.tools.web_search_tool import DeepSearchTool
 from src.agent.tools.arxiv_tool import AdvancedArxivTool
 from src.agent.tools.semantic_scholar_tool import SemanticScholarTool
-
-# HTTP 클라이언트는 재사용하는 것이 효율적이므로 모듈 수준에서 정의.
-client = httpx.AsyncClient(base_url=settings.MAIN_SERVER_URL)
+from src.agent.tools.generate_report_tool import generate_report
 
 # ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달.
 llm = ChatOpenAI(
@@ -32,33 +31,6 @@ llm = ChatOpenAI(
 
 # 오늘 날짜를 문자열로 저장 (프롬프트에 동적으로 사용)
 today_str = datetime.now().strftime('%Y-%m-%d %A')
-
-
-# --- 내부 헬퍼 함수 ---
-async def fetch_messages_from_backend(channel_id: int, user_id: int, jwt_token: str) -> str:
-    """[내부 함수] 메인 서버 API를 호출하여 채널의 전체 대화 내역을 가져옴."""
-    api_url = f"/api/channels/{channel_id}/chats"
-    headers = {
-        "Authorization": f"Bearer {jwt_token}",
-        "X-User-ID": str(user_id)
-    }
-    try:
-        response = await client.get(api_url, headers=headers, timeout=5.0)
-        response.raise_for_status()
-        messages = response.json().get("data", [])
-        if not messages:
-            return ""
-        return "\n".join(
-            f"[{datetime.fromisoformat(msg['createdAt']).strftime('%Y-%m-%d %H:%M')}] "
-            f"{msg['userName']}: {msg.get('content') or '(파일)'}"
-            for msg in messages
-        )
-    except httpx.HTTPStatusError as e:
-        print(f"[fetch_messages_from_backend] 메인 서버 API 오류: {e.response.status_code} {e.response.text}")
-        raise ValueError("대화 내용을 가져오는 데 실패했습니다.") from e
-    except Exception as e:
-        print(f"[fetch_messages_from_backend] 메시지 조회 중 알 수 없는 오류 발생: {e}")
-        raise ValueError("대화 내용을 가져오는 중 문제가 발생했습니다.") from e
 
 # --- LangChain 도구(Tools) 정의 ---
 @tool
@@ -124,7 +96,6 @@ async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
     except httpx.RequestError as e:
         return f"서버 통신 오류: {e}"
 
-
 @tool
 async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_token: str, time_query: str = "all") -> str:
     """채널의 대화 내용을 요약. '회의 요약해줘', '대화 정리해줘' 등과 같이 말할 때 사용."""
@@ -189,12 +160,12 @@ async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_tok
     summary_report = await summarize_chain.ainvoke({"input": conversation_to_summarize})
     return getattr(summary_report, "content", "요약 보고서 생성에 실패했습니다.")
 
-
 # --- LangChain 에이전트 설정 ---
 tools = [
     create_schedule,
     get_schedule,
     summarize_channel_conversations,
+    generate_report,
     DeepSearchTool(),
     AdvancedArxivTool(),
     SemanticScholarTool()
@@ -223,6 +194,7 @@ prompt = ChatPromptTemplate.from_messages(
                 "- `create_schedule`: '일정 추가해줘', '미팅 잡아줘' 등 새로운 일정을 생성할 때 사용합니다.\n"
                 "- `get_schedule`: '오늘 내 일정 보여줘', '내일 뭐 있지?' 등 특정 날짜의 일정을 조회할 때 사용합니다.\n"
                 "- `summarize_channel_conversations`: '회의 내용 요약해줘', '채팅 정리해줘' 등 채널의 대화 내용을 요약할 때 사용합니다.\n"
+                "- `generate_report`: '보고서 초안 만들어줘', '기획서 양식 좀 채워줘' 등 Word(.docx) 문서를 생성할 때 사용합니다.\n"
                 "- `deep_search`: 일반적인 웹 검색이 필요할 때 사용합니다.\n"
                 "- `advanced_arxiv_search`: 컴퓨터 과학, AI 등 STEM 분야의 전문 논문을 심층 분석할 때 사용합니다.\n"
                 "- `semantic_scholar_search`: 심리학, 사회과학 등 모든 학문 분야의 논문을 검색하고 분석할 때 사용합니다.\n"
@@ -272,7 +244,7 @@ async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -
             print(f"  - Completion Tokens: {cb.completion_tokens}")
             print(f"  - Total Cost (USD): ${cb.total_cost:.6f}")
             print("="*40 + "\n")
-            
+
         return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
     # 에이전트 실행의 마지막 안전망으로, 모든 예외를 처리하여 서버가 중단되지 않게 함.
     except Exception as e:  # pylint: disable=broad-exception-caught
