@@ -1,3 +1,8 @@
+
+"""
+LangChain 도구: Word(.docx) 보고서 생성
+주제, 채널 대화, 웹 리서치 결과를 종합하여 보고서 초안을 생성하고 다운로드 링크를 제공합니다.
+"""
 # src/agent/tools/generate_report_tool.py
 import os
 import json
@@ -24,15 +29,14 @@ TEMPLATE_PATH = os.path.join(PROJ_ROOT, "src", "templates", "docx", "reports", "
 
 def assemble_docx_from_outline(outline_json: dict, path: str):
     """LLM이 생성한 JSON 개요를 기반으로, 사용자의 스타일 템플릿을 사용하여 Word 문서를 생성합니다."""
-    
     try:
         # 사용자의 템플릿을 직접 엽니다.
         doc = Document(TEMPLATE_PATH)
         # 기존 내용을 모두 지웁니다. (스타일은 유지됨)
         for para in doc.paragraphs:
-            p = para._element
+            p = para._element  # pylint: disable=protected-access
             p.getparent().remove(p)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"Warning: Template not found at {TEMPLATE_PATH} or is invalid. Creating a blank document. Error: {e}")
         doc = Document()
 
@@ -53,11 +57,9 @@ def assemble_docx_from_outline(outline_json: dict, path: str):
     # --- 3. 본문 생성 ---
     for section in outline_json.get("sections", []):
         doc.add_heading(section.get('section_title', '제목 없음'), level=2) # 'Heading 2' 스타일
-        
         p = doc.add_paragraph()
         p.add_run('[작성 가이드]').bold = True
         doc.add_paragraph(section.get('guideline', '')).italic = True
-        
         if section.get('key_points'):
             doc.add_paragraph('') # 여백
             p = doc.add_paragraph()
@@ -82,10 +84,8 @@ async def generate_report(topic: str, user_id: int, channel_id: int, jwt_token: 
     # --- 1단계: 실시간 정보 수집 ---
     print("   - 1.1: Fetching channel conversation...")
     chat_history = await fetch_messages_from_backend(channel_id, user_id, jwt_token)
-    
     print("   - 1.2: Performing web search...")
-    web_research_results = web_search_tool._run(f"{topic}에 대한 최신 정보, 통계, 전문가 의견")
-    
+    web_research_results = web_search_tool._run(f"{topic}에 대한 최신 정보, 통계, 전문가 의견")  # pylint: disable=protected-access
     combined_info = f"주제: {topic}\n\n[채널 대화 내용]:\n{chat_history}\n\n[웹 리서치 결과]:\n{web_research_results}"
     print("   - 1.3: Data collection complete.")
 
@@ -114,16 +114,14 @@ async def generate_report(topic: str, user_id: int, channel_id: int, jwt_token: 
     }}
     """
     human_prompt = "주제: {topic}\n\n[수집된 핵심 정보]:\n{information}"
-    
     prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
     chain = prompt | llm
-    
     try:
         response = await chain.ainvoke({"topic": topic, "information": combined_info})
         json_string = response.content.strip().replace("```json", "").replace("```", "").strip()
         outline_json = json.loads(json_string)
         print("   - 2.2: Report outline generated successfully.")
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"Error creating report outline: {e}")
         return "보고서 개요 생성에 실패했습니다. LLM 응답을 처리할 수 없습니다."
 
@@ -136,7 +134,7 @@ async def generate_report(topic: str, user_id: int, channel_id: int, jwt_token: 
     try:
         assemble_docx_from_outline(outline_json, output_path)
         print(f"   - 3.2: ✅ Report successfully generated at: {output_path}")
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"Error generating report file: {e}")
         return "보고서 파일을 생성하는 중 오류가 발생했습니다."
 

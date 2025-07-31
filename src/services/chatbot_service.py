@@ -7,7 +7,6 @@ LangChain을 사용하여 AI 에이전트를 생성하고,
 from datetime import datetime
 
 # 서드파티 라이브러리
-import httpx
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,11 +15,12 @@ from langchain_community.callbacks import get_openai_callback
 
 # 로컬 애플리케이션 라이브러리
 from src.core.config import settings
-from src.utils.api_client import fetch_messages_from_backend, client
+from src.utils.api_client import fetch_messages_from_backend
 from src.agent.tools.web_search_tool import DeepSearchTool
 from src.agent.tools.arxiv_tool import AdvancedArxivTool
 from src.agent.tools.semantic_scholar_tool import SemanticScholarTool
 from src.agent.tools.generate_report_tool import generate_report
+from src.agent.tools.schedule_tool import get_schedule, recommend_meeting_time, create_schedule, update_schedule, delete_schedule
 
 # ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달.
 llm = ChatOpenAI(
@@ -33,68 +33,6 @@ llm = ChatOpenAI(
 today_str = datetime.now().strftime('%Y-%m-%d %A')
 
 # --- LangChain 도구(Tools) 정의 ---
-@tool
-async def create_schedule(title: str, start_time: str, end_time: str, user_id: int, jwt_token: str) -> str:
-    """새로운 개인 일정 생성. 사용자가 '일정 추가', '미팅 잡아줘' 등과 같이 말할 때 사용."""
-    print(f"Executing create_schedule for user {user_id}: {title}")
-    try:
-        response = await client.post(
-            "/api/users/me/events",
-            json={
-                "title": title,
-                "startDatetime": start_time,
-                "endDatetime": end_time,
-                "allDay": False,
-                "themeColor": "#3b82f6"
-            },
-            headers={
-                "X-User-ID": str(user_id),
-                "Authorization": f"Bearer {jwt_token}"
-            },
-        )
-        response.raise_for_status()
-        return response.json().get("message", f"'{title}' 일정이 성공적으로 생성되었습니다.")
-    except httpx.HTTPStatusError as e:
-        error_message = e.response.json().get("message", "알 수 없는 오류")
-        return f"일정 생성 실패: {error_message}"
-    except httpx.RequestError as e:
-        return f"서버 통신 오류: {e}"
-
-
-@tool
-async def get_schedule(date: str, user_id: int, jwt_token: str) -> str:
-    """특정 날짜의 사용자 일정을 조회. '오늘 일정 알려줘', '내일 스케줄' 등과 같이 말할 때 사용."""
-    print(f"Executing get_schedule for user {user_id} on {date}")
-    try:
-        response = await client.get(
-            "/api/users/me/events",
-            headers={
-                "X-User-ID": str(user_id),
-                "Authorization": f"Bearer {jwt_token}"
-            }
-        )
-        response.raise_for_status()
-        schedules = response.json().get("data", [])
-
-        target_date = datetime.strptime(date, "%Y-%m-%d").date()
-
-        date_schedules = [
-            s for s in schedules
-            if datetime.fromisoformat(s['startDatetime']).date() == target_date
-        ]
-
-        if not date_schedules:
-            return f"{date}에는 일정이 없습니다."
-
-        schedule_list_str = "\n".join(
-            [f"- {s['title']} ({datetime.fromisoformat(s['startDatetime']).strftime('%H:%M')} ~ {datetime.fromisoformat(s['endDatetime']).strftime('%H:%M')})" for s in date_schedules]
-        )
-        return f"{date}의 일정 목록입니다:\n{schedule_list_str}"
-    except httpx.HTTPStatusError as e:
-        error_message = e.response.json().get("message", "알 수 없는 오류")
-        return f"일정 조회 실패: {error_message}"
-    except httpx.RequestError as e:
-        return f"서버 통신 오류: {e}"
 
 @tool
 async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_token: str, time_query: str = "all") -> str:
@@ -162,8 +100,11 @@ async def summarize_channel_conversations(user_id: int, channel_id: int, jwt_tok
 
 # --- LangChain 에이전트 설정 ---
 tools = [
-    create_schedule,
     get_schedule,
+    create_schedule,
+    update_schedule,
+    delete_schedule,
+    recommend_meeting_time,
     summarize_channel_conversations,
     generate_report,
     DeepSearchTool(),
@@ -175,44 +116,47 @@ prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            (
-                "당신은 **'KSEB 협업툴 전문 에이전트'**입니다.\n"
-                "당신의 유일한 임무는 사용자의 요청을 분석하여, 아래에 명시된 '사용 가능한 도구' 중 가장 적합한 것 하나를 찾아 실행하는 것입니다.\n"
-                "\n"
-                "### **절대 원칙 (Absolute Rules)**\n"
-                "1.  **절대로, 어떤 상황에서도 도구를 사용하지 않고 직접 답변을 생성해서는 안 됩니다.**\n"
-                "2.  모든 사용자의 요청은 반드시 도구를 통해서만 처리해야 합니다.\n"
-                "3.  **최우선 원칙:** 도구가 오류 없이 유의미한 결과(작업 로그 포함)를 반환했다면, 그것이 최선의 결과라고 믿고 **그 내용을 수정 없이 그대로 사용자에게 전달해야 합니다.**\n"
-                "4.  만약 사용자의 요청을 처리할 수 있는 적절한 도구가 없다면, 반드시 '죄송합니다. 해당 기능은 지원하지 않습니다.' 라고만 답변해야 합니다.\n"
-                "\n"
-                "### **도구 선택 전략 (Tool Selection Strategy)**\n"
-                "- **1순위 (기술/과학):** 질문이 컴퓨터 과학, AI, 물리, 수학 등 명확한 STEM 분야에 해당하면 `advanced_arxiv_search`를 먼저 사용하세요.\n"
-                "- **2순위 (사회과학/인문학/일반):** 질문이 심리학, 사회학, 교육학 등 비-STEM 분야이거나, `advanced_arxiv_search`로 결과를 찾지 못했을 경우, `semantic_scholar_search`를 사용하세요.\n"
-                "- **3순위 (웹 정보):** 위 두 가지 학술 검색으로도 답을 찾을 수 없거나, 최신 뉴스/트렌드에 대한 질문일 경우에만 `deep_search`를 사용하세요.\n"
-                "\n"
-                "### **사용 가능한 도구**\n"
-                "- `create_schedule`: '일정 추가해줘', '미팅 잡아줘' 등 새로운 일정을 생성할 때 사용합니다.\n"
-                "- `get_schedule`: '오늘 내 일정 보여줘', '내일 뭐 있지?' 등 특정 날짜의 일정을 조회할 때 사용합니다.\n"
-                "- `summarize_channel_conversations`: '회의 내용 요약해줘', '채팅 정리해줘' 등 채널의 대화 내용을 요약할 때 사용합니다.\n"
-                "- `generate_report`: '보고서 초안 만들어줘', '기획서 양식 좀 채워줘' 등 Word(.docx) 문서를 생성할 때 사용합니다.\n"
-                "- `deep_search`: 일반적인 웹 검색이 필요할 때 사용합니다.\n"
-                "- `advanced_arxiv_search`: 컴퓨터 과학, AI 등 STEM 분야의 전문 논문을 심층 분석할 때 사용합니다.\n"
-                "- `semantic_scholar_search`: 심리학, 사회과학 등 모든 학문 분야의 논문을 검색하고 분석할 때 사용합니다.\n"
-                "\n"
-                "--- \n"
-                f"오늘 날짜: {today_str}\n"
-                "현재 사용자의 ID: {user_id}\n"
-                "현재 채널 ID: {channel_id}\n"
-                "현재 사용자 토큰: {jwt_token}\n"
-            ),
+            f"""당신은 **'KSEB 협업툴 전문 에이전트'**입니다.
+                당신의 유일한 임무는 사용자의 요청을 분석하여, 아래에 명시된 '사용 가능한 도구' 중 가장 적합한 것 하나를 찾아 실행하는 것입니다.
+
+                ### **절대 원칙 (Absolute Rules)**
+                1.  **절대로, 어떤 상황에서도 도구를 사용하지 않고 직접 답변을 생성해서는 안 됩니다.**
+                2.  모든 사용자의 요청은 반드시 도구를 통해서만 처리해야 합니다.
+                3.  **최우선 원칙:** 도구가 반환한 결과가 일반 텍스트가 아닌 JSON 형식의 문자열(예: `get_schedule`, `recommend_meeting_time`의 결과)일 경우, **절대 내용을 해석하거나 요약하지 말고, 해당 JSON 문자열 원본을 그대로** 사용자에게 전달해야 합니다.
+                4.  **오류 처리:** 도구 실행 중 '오류' 또는 '실패'라는 단어가 포함된 결과가 반환되면, 그 내용을 바탕으로 '죄송합니다, 요청을 처리하는 중 문제가 발생했습니다.' 라고 사용자에게 알려주세요.
+                5.  만약 사용자의 요청을 처리할 수 있는 적절한 도구가 없다면, 반드시 '죄송합니다. 해당 기능은 지원하지 않습니다.' 라고만 답변해야 합니다.
+
+                ### **도구 선택 우선순위**
+                1.  **STEM(과학, 기술, 공학, 수학) 분야, 특히 컴퓨터 과학, 물리학 등의 전문적인 논문 검색 요청에는 반드시 `advanced_arxiv_search`를 최우선으로 사용하세요.**
+                2.  `advanced_arxiv_search`로 결과를 찾지 못했거나, 더 광범위한 학문 분야의 논문이 필요할 때만 `semantic_scholar_search`를 사용하세요.
+                3.  일반적인 최신 정보나, 학술적이지 않은 주제에 대한 웹 검색이 필요할 때만 `deep_search`를 사용하세요.
+
+                ### **사용 가능한 도구**
+                - `get_schedule`: '내 일정 보여줘', '우리 그룹 내일 일정 알려줘' 등 특정 기간의 개인 또는 그룹 일정을 조회할 때 사용합니다.
+                - `create_schedule`: '내일 3시에 회의 잡아줘', '스터디 일정 추가해줘' 등 새로운 일정을 생성할 때 사용합니다.
+                - `update_schedule`: '회의 시간을 4시로 변경해줘', '일정 제목을 바꿔줘' 등 기존 일정의 정보를 수정할 때 사용합니다. 수정할 일정의 ID를 알아야 합니다. **사용자 친화적인 응답을 위해, 수정하려는 일정의 현재 제목을 `current_title` 파라미터에 포함시켜 주세요.** 만약 이름이 같은 일정이 여러 개라면, 사용자에게 어떤 것을 수정할지 되물어봐야 합니다.
+                - `delete_schedule`: '회의 취소해줘', '스터디 일정 삭제해줘' 등 기존 일정을 삭제할 때 사용합니다. 삭제할 일정의 ID를 알아야 합니다. **사용자 친화적인 응답을 위해, 삭제하려는 일정의 제목을 `title` 파라미터에 포함시켜 주세요.** 만약 이름이 같은 일정이 여러 개라면, 사용자에게 어떤 것을 삭제할지 되물어봐야 합니다.
+                - `recommend_meeting_time`: '회의 시간 추천해줘' 등 그룹 멤버 모두가 참석 가능한 회의 시간을 추천받고 싶을 때 사용합니다. **'다음 주'와 같은 요청이 들어오면, 오늘 날짜를 기준으로 다음 주의 시작 날짜(월요일)를 계산하여 `start_date` 파라미터에 'YYYY-MM-DD' 형식으로 전달해야 합니다.**
+                - `summarize_channel_conversations`: '회의 내용 요약해줘' 등 채널의 대화 내용을 요약할 때 사용합니다.
+                - `generate_report`: '보고서 초안 만들어줘' 등 Word(.docx) 문서를 생성할 때 사용합니다.
+                - `deep_search`: 일반적인 웹 검색이 필요할 때 사용합니다.
+                - `advanced_arxiv_search`: 컴퓨터 과학 등 STEM 분야의 전문 논문을 분석할 때 사용합니다.
+                - `semantic_scholar_search`: 모든 학문 분야의 논문을 검색하고 분석할 때 사용합니다.
+
+                --- 
+                오늘 날짜: {today_str}
+                현재 사용자의 ID: {{user_id}}
+                현재 그룹 ID: {{group_id}}
+                현재 채널 ID: {{channel_id}}
+                현재 사용자 토큰: {{jwt_token}}
+            """,
         ),
         ("human", "{input}"),
-        # 에이전트의 이전 작업 기록을 전달하는 플레이스홀더.
         ("placeholder", "{agent_scratchpad}"),
     ]
 )
 
-
+# 에이전트와 실행기 생성
 agent = create_tool_calling_agent(llm, tools, prompt)
 
 agent_executor = AgentExecutor(
@@ -223,17 +167,16 @@ agent_executor = AgentExecutor(
     max_iterations=10,
 )
 
-async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -> str:
+async def run_agent(query: str, user_id: int, group_id: int, channel_id: int, jwt_token: str) -> str:
     """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
     try:
         with get_openai_callback() as cb:
             result = await agent_executor.ainvoke({
                 "input": query,
                 "user_id": user_id,
+                "group_id": group_id,
                 "channel_id": channel_id,
                 "jwt_token": jwt_token,
-                # 무한 루프 방지를 위해 에이전트의 작업 기록(scratchpad)을 전달.
-                "agent_scratchpad": []
             })
 
             # 콜백 객체(cb)에 기록된 토큰 정보를 출력.
@@ -250,4 +193,3 @@ async def run_agent(query: str, user_id: int, channel_id: int, jwt_token: str) -
     except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"에이전트 실행 중 오류 발생: {e}")
         return "죄송합니다, 요청을 처리하는 중에 예상치 못한 오류가 발생했습니다. 질문을 조금 더 구체적으로 바꿔서 다시 시도해 주시겠어요?"
-    

@@ -10,12 +10,13 @@ from ..core.security import get_current_user_id
 router = APIRouter(prefix="/api/v1/chatbot", tags=["Chatbot"])
 
 @router.post(
-    "/channels/{channel_id}/query",
+    "/groups/{group_id}/channels/{channel_id}/query",
     response_model=ChatResponse,
     summary="AI 챗봇에게 질의",
     description="사용자의 질문(query)과 인증 토큰을 받아 AI 에이전트를 실행하고 답변을 반환합니다.",
 )
 async def handle_chat_query(
+    group_id: int,
     channel_id: int,
     request: ChatRequest,
     http_request: Request,         # 반드시 Depends보다 앞에 위치!
@@ -37,6 +38,7 @@ async def handle_chat_query(
         answer = await run_agent(
             query=request.query,
             user_id=user_id,
+            group_id=group_id,
             channel_id=channel_id,
             jwt_token=jwt_token,  # Bearer 없는 진짜 토큰만 서비스에 넘김
         )
