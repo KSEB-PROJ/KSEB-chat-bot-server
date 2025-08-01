@@ -288,9 +288,24 @@ async def get_schedule(
 ) -> str:
     """개인 또는 그룹 일정을 기간으로 필터링하여 가져옴."""
     params = {}
-    if start_date and end_date:
-        params["startDate"] = start_date
-        params["endDate"] = end_date
+    if start_date:
+        try:
+            # YYYY-MM-DD 형식의 날짜 문자열을 datetime 객체로 변환
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            # 해당 날짜의 시작 시간(00:00:00)으로 설정하고 ISO 형식으로 변환
+            params["startDate"] = start_dt.replace(hour=0, minute=0, second=0).isoformat()
+
+            # end_date가 없으면 start_date와 동일하게 설정
+            end_dt_str = end_date or start_date
+            end_dt = datetime.strptime(end_dt_str, "%Y-%m-%d")
+            # 해당 날짜의 끝 시간(23:59:59)으로 설정하고 ISO 형식으로 변환
+            params["endDate"] = end_dt.replace(hour=23, minute=59, second=59).isoformat()
+
+        except ValueError:
+            return json.dumps({
+                "tool": "get_schedule",
+                "error": "날짜 형식이 잘못되었습니다. 'YYYY-MM-DD' 형식을 사용해야 합니다."
+            })
 
     if schedule_type == "personal":
         endpoint = "/api/users/me/events"
