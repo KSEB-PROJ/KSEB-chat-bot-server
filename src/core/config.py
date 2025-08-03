@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     """
     OPENAI_API_KEY: str
     MAIN_SERVER_URL: str = "http://localhost:8080"
+    CHATBOT_SERVER_URL: str = "http://localhost:8001"
     JWT_SECRET: str
     JWT_ALGORITHM: str
+    API_V1_STR: str = "/api/v1"
     OPENAI_API_BASE_URL: str
     OPENAI_MODEL: str = "gpt-4.1"
     GOOGLE_API_KEY: str

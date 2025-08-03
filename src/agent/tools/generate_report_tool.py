@@ -1,15 +1,18 @@
-
 """
-LangChain 도구: Word(.docx) 보고서 생성
-주제, 채널 대화, 웹 리서치 결과를 종합하여 보고서 초안을 생성하고 다운로드 링크를 제공합니다.
+LangChain 도구: 동적 Word(.docx) 보고서 생성 (v9: 디자인 강화 최종판)
+python-docx의 모든 기능을 활용하여, 코드 레벨에서 직접 디자인과 레이아웃을 제어합니다.
 """
-# src/agent/tools/generate_report_tool.py
 import os
 import json
 import uuid
 import tempfile
 from datetime import datetime
 from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -17,127 +20,271 @@ from langchain_openai import ChatOpenAI
 from src.core.config import settings
 from src.utils.api_client import fetch_messages_from_backend
 from .web_search_tool import DeepSearchTool
+from .semantic_scholar_tool import SemanticScholarTool
 
-# LLM 및 도구 인스턴스 초기화
-llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.2, api_key=settings.OPENAI_API_KEY)
+# --- 초기 설정 ---
+llm = ChatOpenAI(model=settings.OPENAI_MODEL, temperature=0.3, api_key=settings.OPENAI_API_KEY)
 web_search_tool = DeepSearchTool()
+paper_search_tool = SemanticScholarTool()
+TEMP_DIR = tempfile.gettempdir()
 
-# 이 파일의 현재 위치를 기준으로 프로젝트 루트 경로를 계산합니다.
-PROJ_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-# 사용자의 커스텀 템플릿을 직접 사용하도록 경로 변경
-TEMPLATE_PATH = os.path.join(PROJ_ROOT, "src", "templates", "docx", "reports", "user_custom_template.docx")
+# --- AI 컨텍스트 생성 로직 (이전과 동일) ---
+def create_hierarchical_context(topic: str, combined_info: str) -> dict:
+    """LLM을 사용하여 계층적인 구조의 보고서 컨텍스트를 생성합니다."""
+    system_prompt = """
+    당신은 최고의 컨설턴트이자 전문 작가입니다. 당신의 임무는 주어진 주제와 원시 데이터를 바탕으로, '계층적인' 구조의 완벽한 문서 초안과 가이드를 'JSON' 형식으로 생성하는 것입니다.
 
-def assemble_docx_from_outline(outline_json: dict, path: str):
-    """LLM이 생성한 JSON 개요를 기반으로, 사용자의 스타일 템플릿을 사용하여 Word 문서를 생성합니다."""
+    **문서 생성 규칙:**
+    1.  **계층 구조:** 문서는 '서론-본론-결론'과 같은 `main_sections`으로 구성됩니다. '본론'은 반드시 여러 개의 `sub_sections`으로 나누어 깊이를 더해야 합니다.
+    2.  **콘텐츠와 가이드 분리:** 각 `sub_section`마다, `content`(초안)와 `guideline`(발전 방향 가이드)을 반드시 분리하여 작성합니다.
+    3.  **구조화된 표(Table):** 데이터 요약이 필요하면, `table` 객체에 `headers`와 `rows`를 포함하여 구조화된 데이터를 제공합니다.
+    4.  **참고문헌:** 마지막 `main_section`은 반드시 '참고문헌'이어야 하며, `content`에 APA 양식의 리스트를 포함합니다.
+    5.  **JSON 출력:** 다른 설명 없이, 최종 결과물은 반드시 아래 명시된 JSON 형식이어야 합니다.
+
+    **출력 JSON 형식:**
+    {{
+      "report_title": "...", "course_name": "...", "professor_name": "...", "department": "...", "student_id": "...", "student_name": "...",
+      "main_sections": [
+        {{"title": "I. 서론", "content": "...", "guideline": "..."}},
+        {{
+          "title": "II. 본론",
+          "sub_sections": [
+            {{
+              "title": "1. 소주제 1", "content": "...", "guideline": "...",
+              "table": {{"headers": [...], "rows": [[...]]}}
+            }},
+            {{"title": "2. 소주제 2", "content": "...", "guideline": "..."}}
+          ]
+        }},
+        {{"title": "III. 결론", "content": "...", "guideline": "..."}},
+        {{"title": "IV. 참고문헌", "content": "1. Author (Year)...\n2. ..."}}
+      ]
+    }}
+    """
+    human_prompt = "주제: {topic}\n\n[원시 데이터]:\n{information}"
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
+    chain = prompt | llm
+
+    print("   - 2.1: LLM으로 계층 구조 컨텍스트 생성 시작...")
+    response = chain.invoke({"topic": topic, "information": combined_info})
+    json_string = response.content.strip().replace("```json", "").replace("```", "").strip()
+    print("   - 2.2: LLM 응답 수신 완료.")
+
     try:
-        # 사용자의 템플릿을 직접 엽니다.
-        doc = Document(TEMPLATE_PATH)
-        # 기존 내용을 모두 지웁니다. (스타일은 유지됨)
-        for para in doc.paragraphs:
-            p = para._element  # pylint: disable=protected-access
-            p.getparent().remove(p)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"Warning: Template not found at {TEMPLATE_PATH} or is invalid. Creating a blank document. Error: {e}")
+        context = json.loads(json_string)
+        print("   - 2.3: JSON 파싱 성공.")
+        return context
+    except json.JSONDecodeError as e:
+        print(f"Fatal: LLM이 유효한 JSON을 생성하지 못했습니다. \n오류: {e}\n응답 내용: {json_string}")
+        raise ValueError("AI가 문서 구조를 생성하는 데 실패했습니다.") from e
+
+# --- 최종 Word 문서 생성 로직 (디자인 강화) ---
+def set_cell_shade(cell, shade: str):
+    """테이블 셀에 배경색을 적용합니다."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), shade)
+    tc_pr.append(shd)
+
+def add_page_numbers(doc):
+    """문서의 모든 섹션 푸터에 페이지 번호를 추가합니다."""
+    for section in doc.sections:
+        footer = section.footer
+        p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.text = "Page "
+        
+        # Add PAGE field
+        run = p.add_run()
+        fldChar = OxmlElement('w:fldChar')
+        fldChar.set(qn('w:fldCharType'), 'begin')
+        run._r.append(fldChar)
+
+        instrText = OxmlElement('w:instrText')
+        instrText.set(qn('xml:space'), 'preserve')
+        instrText.text = 'PAGE'
+        run._r.append(instrText)
+
+        fldChar = OxmlElement('w:fldChar')
+        fldChar.set(qn('w:fldCharType'), 'end')
+        run._r.append(fldChar)
+
+def build_docx_from_context(context: dict) -> str:
+    """python-docx를 사용하여 디자인이 강화된 Word 문서를 직접 생성합니다."""
+    try:
         doc = Document()
+        # 기본 스타일 설정
+        style = doc.styles['Normal']
+        style.font.name = '맑은 고딕'
+        style.font.size = Pt(11)
 
-    # --- 1. 표지 생성 (Word 기본 스타일 사용) ---
-    title = outline_json.get("title", "제목 없음")
-    doc.add_heading(title, level=0) # 'Title' 스타일
-    doc.add_paragraph(f"작성일: {datetime.now().strftime('%Y-%m-%d')}")
-    doc.add_paragraph("소속: KSEB대학교 AI융합학과")
-    doc.add_paragraph("작성자: AI 어시스턴트")
-    doc.add_page_break()
+        # --- 1. 표지 ---
+        title_p = doc.add_paragraph()
+        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_run = title_p.add_run(context.get('report_title', '제목 없음'))
+        title_run.bold = True
+        title_run.font.size = Pt(24)
+        title_p.paragraph_format.space_after = Pt(24)
 
-    # --- 2. 목차 생성 ---
-    doc.add_heading("목차", level=1) # 'Heading 1' 스타일
-    for item in outline_json.get("table_of_contents", []):
-        doc.add_paragraph(item, style='List Bullet')
-    doc.add_page_break()
+        # 정보 테이블
+        table = doc.add_table(rows=6, cols=2)
+        table.style = 'Table Grid'
+        table.autofit = False
+        table.columns[0].width = Inches(1.5)
+        table.columns[1].width = Inches(4.5)
+        
+        cover_data = {
+            '과목명': context.get('course_name', ''), '담당 교수': context.get('professor_name', ''),
+            '소속': context.get('department', ''), '학번': context.get('student_id', ''),
+            '이름': context.get('student_name', ''), '제출일': context.get('submission_date', '')
+        }
+        for i, (key, value) in enumerate(cover_data.items()):
+            cell_key = table.cell(i, 0)
+            cell_value = table.cell(i, 1)
+            cell_key.text = key
+            cell_value.text = value
+            cell_key.paragraphs[0].runs[0].bold = True
+            cell_key.vertical_alignment = cell_value.vertical_alignment = 1 # Center
+        
+        doc.add_page_break()
 
-    # --- 3. 본문 생성 ---
-    for section in outline_json.get("sections", []):
-        doc.add_heading(section.get('section_title', '제목 없음'), level=2) # 'Heading 2' 스타일
-        p = doc.add_paragraph()
-        p.add_run('[작성 가이드]').bold = True
-        doc.add_paragraph(section.get('guideline', '')).italic = True
-        if section.get('key_points'):
-            doc.add_paragraph('') # 여백
-            p = doc.add_paragraph()
-            p.add_run('핵심 포인트:').bold = True
-            for point in section['key_points']:
-                text = str(point).strip().lstrip('- ').strip()
-                doc.add_paragraph(text, style='List Bullet')
+        # --- 2. 목차 ---
+        doc.add_heading("목차", level=1).paragraph_format.space_after = Pt(18)
+        for sec in context.get("main_sections", []):
+            p = doc.add_paragraph(style='List Bullet')
+            p.add_run(sec.get('title', '')).bold = True
+            p.paragraph_format.left_indent = Inches(0.25)
+            if "sub_sections" in sec:
+                for sub in sec.get("sub_sections", []):
+                    sub_p = doc.add_paragraph(style='List Bullet 2')
+                    sub_p.add_run(sub.get('title', ''))
+                    sub_p.paragraph_format.left_indent = Inches(0.5)
+        doc.add_page_break()
 
-        if section != outline_json.get("sections", [])[-1]:
-            doc.add_page_break()
+        # --- 3. 본문 ---
+        for sec in context.get("main_sections", []):
+            h1 = doc.add_heading(sec.get('title', ''), level=1)
+            h1.paragraph_format.space_before = Pt(12)
+            h1.paragraph_format.space_after = Pt(6)
+            
+            if "sub_sections" in sec:
+                for sub in sec.get("sub_sections", []):
+                    h2 = doc.add_heading(sub.get('title', ''), level=2)
+                    h2.paragraph_format.space_after = Pt(6)
+                    
+                    p_content_title = doc.add_paragraph()
+                    p_content_title.add_run('[초안]').bold = True
+                    p_content_title.paragraph_format.space_after = Pt(4)
+                    
+                    doc.add_paragraph(sub.get('content', ''))
+                    doc.add_paragraph()
 
-    doc.save(path)
+                    if "table" in sub and sub["table"]:
+                        table_data = sub["table"]
+                        headers = table_data.get("headers", [])
+                        rows = table_data.get("rows", [])
+                        if headers and rows:
+                            tbl = doc.add_table(rows=1, cols=len(headers))
+                            tbl.style = 'Table Grid'
+                            for i, header in enumerate(headers):
+                                cell = tbl.cell(0, i)
+                                cell.text = header
+                                set_cell_shade(cell, 'D9D9D9') # 헤더 배경색
+                                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            for row_data in rows:
+                                row_cells = tbl.add_row().cells
+                                for i, cell_text in enumerate(row_data):
+                                    row_cells[i].text = str(cell_text)
+                            doc.add_paragraph()
+
+                    if sub.get("guideline"):
+                        p_guide = doc.add_paragraph()
+                        run_guide = p_guide.add_run('💡 발전 방향 가이드: ')
+                        run_guide.bold = True
+                        run_guide.font.color.rgb = RGBColor(102, 102, 102)
+                        p_guide.add_run(sub.get('guideline', '')).italic = True
+                        for run in p_guide.runs:
+                            run.font.size = Pt(10)
+                        doc.add_paragraph()
+            else:
+                doc.add_paragraph(sec.get('content', ''))
+                if sec.get("guideline"):
+                    p_guide = doc.add_paragraph()
+                    run_guide = p_guide.add_run('💡 발전 방향 가이드: ')
+                    run_guide.bold = True
+                    run_guide.font.color.rgb = RGBColor(102, 102, 102)
+                    p_guide.add_run(sec.get('guideline', '')).italic = True
+                    for run in p_guide.runs:
+                        run.font.size = Pt(10)
+            
+            # 각 대주제가 끝날 때마다 페이지 나누기
+            if sec != context.get("main_sections", [])[-1]:
+                doc.add_page_break()
+
+        # --- 4. 페이지 번호 추가 ---
+        add_page_numbers(doc)
+
+        output_filename = f"{uuid.uuid4()}.docx"
+        output_path = os.path.join(TEMP_DIR, output_filename)
+        doc.save(output_path)
+        return output_filename
+    except Exception as e:
+        print(f"Fatal: Word 문서 생성 중 오류 발생: {e}")
+        raise IOError("Word 문서 파일 생성에 실패했습니다.") from e
+
 
 @tool
 async def generate_report(topic: str, user_id: int, channel_id: int, jwt_token: str) -> str:
     """
-    주제(topic)와 관련된 채널 대화 및 웹 리서치 결과를 종합하여,
-    체계적인 구조와 전문적인 디자인을 갖춘 Word 보고서 초안을 생성하고 다운로드 링크를 반환합니다.
+    (v9) 사용자 요청(topic)을 분석하여, AI가 계층 구조의 목차, 초안, 가이드, 표, 참고문헌 데이터를 생성하고,
+    이를 python-docx를 이용해 디자인이 강화된 Word 문서로 직접 조립하여 완성형 초안을 생성합니다.
     """
-    print(f"Executing final generate_report for user {user_id} on topic: '{topic}'")
+    print("--- DYNAMIC REPORT GENERATION (v9) START ---")
+    print(f"User: {user_id}, Topic: '{topic}'")
 
-    # --- 1단계: 실시간 정보 수집 ---
-    print("   - 1.1: Fetching channel conversation...")
-    chat_history = await fetch_messages_from_backend(channel_id, user_id, jwt_token)
-    print("   - 1.2: Performing web search...")
-    web_research_results = web_search_tool._run(f"{topic}에 대한 최신 정보, 통계, 전문가 의견")  # pylint: disable=protected-access
-    combined_info = f"주제: {topic}\n\n[채널 대화 내용]:\n{chat_history}\n\n[웹 리서치 결과]:\n{web_research_results}"
-    print("   - 1.3: Data collection complete.")
-
-    # --- 2단계: LLM으로 보고서 구조 설계 (JSON 생성) ---
-    print("   - 2.1: Generating report outline with LLM...")
-    system_prompt = """
-    당신은 명문대 글쓰기 센터의 전문 튜터입니다. 당신의 임무는 주어진 주제와 핵심 정보들을 바탕으로, 논리적이고 체계적인 '대학생 연구 보고서'의 개요를 JSON 형식으로 생성하는 것입니다.
-
-    **보고서 작성 원칙:**
-    1.  **구조:** 서론-본론-결론의 명확한 3단 구조를 반드시 따릅니다.
-    2.  **목차:** '본론'은 분석의 깊이를 더하기 위해 2~3개의 구체적인 소주제로 나누어 목차를 구성합니다.
-    3.  **가이드라인:** 각 섹션(서론, 본론1, 본론2, 결론 등)마다, 학생이 어떤 내용을 작성해야 하는지 상세하고 친절한 '가이드라인'을 제시해야 합니다.
-    4.  **핵심 포인트:** 주어진 '핵심 정보'에서 가장 중요한 내용들을 추출하여, 각 섹션과 관련된 '핵심 포인트'로 2~4개씩 포함시켜야 합니다.
-    5.  **출력:** 다른 설명 없이, 오직 JSON 객체만을 생성해야 합니다.
-
-    **출력 JSON 형식:**
-    {{
-      "title": "보고서 제목",
-      "table_of_contents": ["I. 서론", "II. 본론 1: [소주제]", "III. 본론 2: [소주제]", "IV. 결론"],
-      "sections": [
-        {{"section_title": "I. 서론", "guideline": "[연구 배경, 문제 제기, 연구의 중요성 및 보고서의 구성 소개]", "key_points": ["[포인트 1]", "[포인트 2]"]}},
-        {{"section_title": "II. 본론 1: ...", "guideline": "[첫 번째 소주제에 대한 심층 분석 및 데이터 제시]", "key_points": [...]}},
-        {{"section_title": "III. 본론 2: ...", "guideline": "[두 번째 소주제에 대한 사례 분석 및 전문가 의견]", "key_points": [...]}},
-        {{"section_title": "IV. 결론", "guideline": "[본론 내용 요약, 연구의 시사점 및 향후 과제 제시]", "key_points": [...]}}
-      ]
-    }}
-    """
-    human_prompt = "주제: {topic}\n\n[수집된 핵심 정보]:\n{information}"
-    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
-    chain = prompt | llm
+    # 1단계: 정보 수집
+    print("   - 1.1: 채널 대화 내용 가져오는 중...")
     try:
-        response = await chain.ainvoke({"topic": topic, "information": combined_info})
-        json_string = response.content.strip().replace("```json", "").replace("```", "").strip()
-        outline_json = json.loads(json_string)
-        print("   - 2.2: Report outline generated successfully.")
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"Error creating report outline: {e}")
-        return "보고서 개요 생성에 실패했습니다. LLM 응답을 처리할 수 없습니다."
-
-    # --- 3단계: Word 파일 조립 및 생성 ---
-    print("   - 3.1: Assembling Word document...")
-    output_filename = f"{uuid.uuid4()}.docx"
-    temp_dir = tempfile.gettempdir()
-    output_path = os.path.join(temp_dir, output_filename)
-
+        chat_history = await fetch_messages_from_backend(channel_id, user_id, jwt_token)
+    except Exception as e:
+        chat_history = f"채널 대화 내용을 가져오는 데 실패했습니다: {e}"
+    print("   - 1.2: 웹 검색 수행 중...")
     try:
-        assemble_docx_from_outline(outline_json, output_path)
-        print(f"   - 3.2: ✅ Report successfully generated at: {output_path}")
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f"Error generating report file: {e}")
-        return "보고서 파일을 생성하는 중 오류가 발생했습니다."
+        web_research_results = web_search_tool.run(f"{topic}에 대한 최신 동향, 통계, 주요 사례 분석")
+    except Exception as e:
+        web_research_results = f"웹 검색에 실패했습니다: {e}"
+    print("   - 1.3: 관련 학술 논문 3개 검색 중...")
+    try:
+        paper_results = paper_search_tool.run(f"topic: {topic}, limit: 3")
+    except Exception as e:
+        paper_results = f"논문 검색에 실패했습니다: {e}"
+    combined_info = (
+        f"문서 주제: {topic}\n\n"
+        f"[채널 대화 내용 요약]:\n{chat_history}\n\n"
+        f"[웹 리서치 결과]:\n{web_research_results}\n\n"
+        f"[학술 논문 정보]:\n{paper_results}"
+    )
+    print("   - 1.4: 모든 데이터 수집 완료.")
 
-    # --- 4단계: 다운로드 링크 반환 ---
-    download_url = f"http://localhost:8001/api/v1/download/{output_filename}"
-    return f"'{outline_json.get('title', topic)}' 보고서 초안이 생성되었습니다. [여기에서 다운로드]({download_url})하세요."
+    # 2단계: AI로 계층 구조 컨텍스트 생성
+    try:
+        report_context = create_hierarchical_context(topic, combined_info)
+        report_context['submission_date'] = datetime.now().strftime('%Y년 %m월 %d일')
+    except ValueError as e:
+        return str(e)
+
+    # 3단계: Word 문서 생성
+    print("   - 3.1: Word 문서 조립 및 생성 시작...")
+    try:
+        output_filename = build_docx_from_context(report_context)
+        print(f"   - 3.2: ✅ 보고서 생성 성공: {output_filename}")
+    except IOError as e:
+        return str(e)
+
+    # 4단계: 다운로드 링크 반환
+    download_url = f"{settings.CHATBOT_SERVER_URL}{settings.API_V1_STR}/download/{output_filename}"
+    report_title = report_context.get('report_title', topic)
+    print("--- DYNAMIC REPORT GENERATION END ---")
+    return f"'{report_title}' 문서 초안이 완성되었습니다.\n[여기에서 다운로드]({download_url})하여 내용을 확인하고 수정하세요."
