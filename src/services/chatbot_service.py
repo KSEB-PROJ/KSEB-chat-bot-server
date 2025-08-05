@@ -20,6 +20,7 @@ from src.agent.tools.web_search_tool import DeepSearchTool
 from src.agent.tools.arxiv_tool import AdvancedArxivTool
 from src.agent.tools.semantic_scholar_tool import SemanticScholarTool
 from src.agent.tools.generate_report_tool import generate_report
+from src.agent.tools.generate_ppt_tool import generate_ppt
 from src.agent.tools.schedule_tool import get_schedule, recommend_meeting_time, create_schedule, update_schedule, delete_schedule
 
 # ChatOpenAI를 생성할 때, 설정 파일에서 읽어온 API 키를 명시적으로 전달.
@@ -107,6 +108,7 @@ tools = [
     recommend_meeting_time,
     summarize_channel_conversations,
     generate_report,
+    generate_ppt,
     DeepSearchTool(),
     AdvancedArxivTool(),
     SemanticScholarTool()
@@ -146,6 +148,7 @@ prompt = ChatPromptTemplate.from_messages(
                 - `recommend_meeting_time`: **(시간 추천용)** "회의 시간 추천해줘" 등 **여러 그룹 멤버가 모두 참석 가능한 빈 시간을 찾을 때만** 사용합니다.
                 - `summarize_channel_conversations`: '회의 내용 요약해줘' 등 채널의 대화 내용을 요약할 때 사용합니다.
                 - `generate_report`: '보고서 초안 만들어줘' 등 Word(.docx) 문서를 생성할 때 사용합니다.
+                - `generate_ppt`: '발표자료 만들어줘', 'PPT 초안 생성해줘' 등 PowerPoint(.pptx) 프레젠테이션을 생성할 때 사용합니다.
                 - `deep_search`: 일반적인 웹 검색이 필요할 때 사용합니다.
                 - `advanced_arxiv_search`: 컴퓨터 과학 등 STEM 분야의 전문 논문을 분석할 때 사용합니다.
                 - `semantic_scholar_search`: 모든 학문 분야의 논문을 검색하고 분석할 때 사용합니다.

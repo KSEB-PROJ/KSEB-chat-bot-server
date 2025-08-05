@@ -28,11 +28,11 @@ web_search_tool = DeepSearchTool()
 paper_search_tool = SemanticScholarTool()
 TEMP_DIR = tempfile.gettempdir()
 
-# --- AI 컨텍스트 생성 로직 (이전과 동일) ---
+# --- AI 컨텍스트 생성 로직 (v10: 개인정보 필드 제거) ---
 def create_hierarchical_context(topic: str, combined_info: str) -> dict:
     """LLM을 사용하여 계층적인 구조의 보고서 컨텍스트를 생성합니다."""
     system_prompt = """
-    당신은 최고의 컨설턴트이자 전문 작가입니다. 당신의 임무는 주어진 주제와 원시 데이터를 바탕으로, '계층적인' 구조의 완벽한 문서 초안과 가이드를 'JSON' 형식으로 생성하는 것입니다.
+    당신은 최고의 컨설턴트이자 전문 작가입니다. 당신의 임무는 주어진 주제와 원시 데이터를 바탕으로, '계층적인' 구조의 완벽한 문서 초안과 가이드라인을 'JSON' 형식으로 생성하는 것입니다.
 
     **문서 생성 규칙:**
     1.  **계층 구조:** 문서는 '서론-본론-결론'과 같은 `main_sections`으로 구성됩니다. '본론'은 반드시 여러 개의 `sub_sections`으로 나누어 깊이를 더해야 합니다.
@@ -43,7 +43,7 @@ def create_hierarchical_context(topic: str, combined_info: str) -> dict:
 
     **출력 JSON 형식:**
     {{
-      "report_title": "...", "course_name": "...", "professor_name": "...", "department": "...", "student_id": "...", "student_name": "...",
+      "report_title": "...",
       "main_sections": [
         {{"title": "I. 서론", "content": "...", "guideline": "..."}},
         {{
@@ -57,7 +57,8 @@ def create_hierarchical_context(topic: str, combined_info: str) -> dict:
           ]
         }},
         {{"title": "III. 결론", "content": "...", "guideline": "..."}},
-        {{"title": "IV. 참고문헌", "content": "1. Author (Year)...\n2. ..."}}
+        {{"title": "IV. 참고문헌", "content": "1. Author (Year)...
+2. ..."}}
       ]
     }}
     """
@@ -78,7 +79,7 @@ def create_hierarchical_context(topic: str, combined_info: str) -> dict:
         print(f"Fatal: LLM이 유효한 JSON을 생성하지 못했습니다. \n오류: {e}\n응답 내용: {json_string}")
         raise ValueError("AI가 문서 구조를 생성하는 데 실패했습니다.") from e
 
-# --- 최종 Word 문서 생성 로직 (디자인 강화) ---
+# --- 최종 Word 문서 생성 로직 (v10: 디자인 강화) ---
 def set_cell_shade(cell, shade: str):
     """테이블 셀에 배경색을 적용합니다."""
     tc_pr = cell._tc.get_or_add_tcPr()
@@ -94,22 +95,26 @@ def add_page_numbers(doc):
         footer = section.footer
         p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.text = "Page "
         
-        # Add PAGE field
+        # Add PAGE field using complex field construction
         run = p.add_run()
-        fldChar = OxmlElement('w:fldChar')
-        fldChar.set(qn('w:fldCharType'), 'begin')
-        run._r.append(fldChar)
-
+        fldChar_begin = OxmlElement('w:fldChar')
+        fldChar_begin.set(qn('w:fldCharType'), 'begin')
+        
         instrText = OxmlElement('w:instrText')
         instrText.set(qn('xml:space'), 'preserve')
         instrText.text = 'PAGE'
-        run._r.append(instrText)
+        
+        fldChar_separate = OxmlElement('w:fldChar')
+        fldChar_separate.set(qn('w:fldCharType'), 'separate')
+        
+        fldChar_end = OxmlElement('w:fldChar')
+        fldChar_end.set(qn('w:fldCharType'), 'end')
 
-        fldChar = OxmlElement('w:fldChar')
-        fldChar.set(qn('w:fldCharType'), 'end')
-        run._r.append(fldChar)
+        run._r.append(fldChar_begin)
+        run._r.append(instrText)
+        run._r.append(fldChar_separate)
+        run._r.append(fldChar_end)
 
 def build_docx_from_context(context: dict) -> str:
     """python-docx를 사용하여 디자인이 강화된 Word 문서를 직접 생성합니다."""
@@ -120,50 +125,118 @@ def build_docx_from_context(context: dict) -> str:
         style.font.name = '맑은 고딕'
         style.font.size = Pt(11)
 
-        # --- 1. 표지 ---
+        # --- 1. 표지 (v14: 최종 레이아웃 수정) ---
+        
+        # 상단 여백
+        doc.add_paragraph().paragraph_format.space_before = Pt(60)
+
+        # 제목
         title_p = doc.add_paragraph()
         title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         title_run = title_p.add_run(context.get('report_title', '제목 없음'))
         title_run.bold = True
-        title_run.font.size = Pt(24)
-        title_p.paragraph_format.space_after = Pt(24)
+        title_run.font.name = '맑은 고딕'
+        title_run.font.size = Pt(26)
+        title_p.paragraph_format.space_after = Pt(12)
 
-        # 정보 테이블
-        table = doc.add_table(rows=6, cols=2)
-        table.style = 'Table Grid'
+        # 제목 아래 수평선
+        hr_p = doc.add_paragraph()
+        p_pr = hr_p._p.get_or_add_pPr()
+        p_borders = OxmlElement('w:pBdr')
+        bottom_border = OxmlElement('w:bottom')
+        bottom_border.set(qn('w:val'), 'single')
+        bottom_border.set(qn('w:sz'), '4')
+        bottom_border.set(qn('w:space'), '1')
+        bottom_border.set(qn('w:color'), 'auto')
+        p_borders.append(bottom_border)
+        p_pr.append(p_borders)
+
+        # 제출일 (위치 및 스타일 변경)
+        date_p = doc.add_paragraph()
+        date_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        date_run = date_p.add_run(datetime.now().strftime('%Y. %m. %d.'))
+        date_run.font.size = Pt(11)
+        date_run.italic = True
+
+        # 제목과 정보 테이블 사이의 여백
+        doc.add_paragraph().paragraph_format.space_before = Pt(150)
+
+        # '폼 스타일' 정보 테이블
+        table = doc.add_table(rows=5, cols=2)
+        table.alignment = WD_ALIGN_PARAGRAPH.CENTER
         table.autofit = False
         table.columns[0].width = Inches(1.5)
-        table.columns[1].width = Inches(4.5)
+        table.columns[1].width = Inches(3.5)
+
+        # 테이블 테두리 제거
+        tbl_pr = table._tbl.tblPr
+        if tbl_pr is None:
+            tbl_pr = OxmlElement('w:tblPr')
+            table._tbl.insert(0, tbl_pr)
         
-        cover_data = {
-            '과목명': context.get('course_name', ''), '담당 교수': context.get('professor_name', ''),
-            '소속': context.get('department', ''), '학번': context.get('student_id', ''),
-            '이름': context.get('student_name', ''), '제출일': context.get('submission_date', '')
+        tbl_borders = OxmlElement('w:tblBorders')
+        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+            border = OxmlElement(f'w:{border_name}')
+            border.set(qn('w:val'), 'nil')
+            tbl_borders.append(border)
+        tbl_pr.append(tbl_borders)
+
+        def set_bottom_border(cell):
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_borders = OxmlElement('w:tcBorders')
+            bottom = OxmlElement('w:bottom')
+            bottom.set(qn('w:val'), 'single')
+            bottom.set(qn('w:sz'), '4')
+            bottom.set(qn('w:color'), 'auto')
+            tc_borders.append(bottom)
+            tc_pr.append(tc_borders)
+
+        report_info = {
+            "과 목 명": "", "담당 교수": "", "소    속": "", "학    번": "", "이    름": ""
         }
-        for i, (key, value) in enumerate(cover_data.items()):
-            cell_key = table.cell(i, 0)
-            cell_value = table.cell(i, 1)
-            cell_key.text = key
-            cell_value.text = value
-            cell_key.paragraphs[0].runs[0].bold = True
-            cell_key.vertical_alignment = cell_value.vertical_alignment = 1 # Center
+        
+        for i, (label, value) in enumerate(report_info.items()):
+            row_cells = table.rows[i].cells
+            label_cell = row_cells[0]
+            label_p = label_cell.paragraphs[0]
+            label_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            label_run = label_p.add_run(label + " :")
+            label_run.bold = True
+            label_run.font.size = Pt(12)
+            
+            value_cell = row_cells[1]
+            value_cell.text = value
+            set_bottom_border(value_cell)
         
         doc.add_page_break()
 
-        # --- 2. 목차 ---
-        doc.add_heading("목차", level=1).paragraph_format.space_after = Pt(18)
+        # --- 2. 목차 (디자인 강화) ---
+        toc_heading = doc.add_heading("목   차", level=1)
+        toc_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        toc_heading.runs[0].font.size = Pt(20)
+        toc_heading.runs[0].bold = True
+        toc_heading.paragraph_format.space_after = Pt(24)
+        
         for sec in context.get("main_sections", []):
-            p = doc.add_paragraph(style='List Bullet')
-            p.add_run(sec.get('title', '')).bold = True
-            p.paragraph_format.left_indent = Inches(0.25)
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.5)
+            p.paragraph_format.space_after = Pt(8)
+            run = p.add_run(sec.get('title', ''))
+            run.font.name = '맑은 고딕'
+            run.font.size = Pt(14)
+            run.bold = True
+            
             if "sub_sections" in sec:
                 for sub in sec.get("sub_sections", []):
-                    sub_p = doc.add_paragraph(style='List Bullet 2')
-                    sub_p.add_run(sub.get('title', ''))
-                    sub_p.paragraph_format.left_indent = Inches(0.5)
+                    sub_p = doc.add_paragraph()
+                    sub_p.paragraph_format.left_indent = Inches(0.8)
+                    sub_p.paragraph_format.space_after = Pt(5)
+                    sub_run = sub_p.add_run(sub.get('title', ''))
+                    sub_run.font.name = '맑은 고딕'
+                    sub_run.font.size = Pt(12)
         doc.add_page_break()
 
-        # --- 3. 본문 ---
+        # --- 3. 본문 (기존 구조 유지) ---
         for sec in context.get("main_sections", []):
             h1 = doc.add_heading(sec.get('title', ''), level=1)
             h1.paragraph_format.space_before = Pt(12)
@@ -219,7 +292,6 @@ def build_docx_from_context(context: dict) -> str:
                     for run in p_guide.runs:
                         run.font.size = Pt(10)
             
-            # 각 대주제가 끝날 때마다 페이지 나누기
             if sec != context.get("main_sections", [])[-1]:
                 doc.add_page_break()
 
@@ -233,6 +305,7 @@ def build_docx_from_context(context: dict) -> str:
     except Exception as e:
         print(f"Fatal: Word 문서 생성 중 오류 발생: {e}")
         raise IOError("Word 문서 파일 생성에 실패했습니다.") from e
+
 
 
 @tool
