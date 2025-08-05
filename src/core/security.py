@@ -15,7 +15,7 @@ def get_current_user_id(
     credentials: HTTPAuthorizationCredentials = Security(security_scheme),
 ) -> int:
     """
-    JWT 토큰을 디코딩하여 현재 사용자의 ID를 반환합니다.
+    JWT 토큰을 디코딩하여 현재 사용자의 ID를 반환.
 
     Args:
         credentials (HTTPAuthorizationCredentials): FastAPI의 Security Dependency를 통해 주입되는 인증 자격 증명.
@@ -24,7 +24,7 @@ def get_current_user_id(
         int: 토큰에서 추출된 사용자의 ID.
 
     Raises:
-        HTTPException: 토큰이 유효하지 않거나 만료된 경우 발생합니다.
+        HTTPException: 토큰이 유효하지 않거나 만료된 경우 발생.
     """
     token = credentials.credentials
     try:
