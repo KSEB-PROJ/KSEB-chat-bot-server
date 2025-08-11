@@ -177,6 +177,10 @@ agent_executor = AgentExecutor(
     max_iterations=10,
 )
 
+import json
+
+# ... (기존 코드)
+
 async def run_agent(query: str, user_id: int, group_id: int, channel_id: int, jwt_token: str) -> str:
     """사용자 질문, 유저 ID, 채널 ID, JWT 토큰을 받아 AI 에이전트를 실행하고 답변을 반환."""
     try:
@@ -198,8 +202,36 @@ async def run_agent(query: str, user_id: int, group_id: int, channel_id: int, jw
             print(f"  - Total Cost (USD): ${cb.total_cost:.6f}")
             print("="*40 + "\n")
 
-        return result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+        output = result.get("output", "죄송합니다. 답변을 생성하지 못했습니다.")
+
+        # 도구 결과가 JSON 문자열인지 확인하고 파싱
+        try:
+            # 문자열이 리스트 형태의 JSON일 수 있으므로 파싱
+            data = json.loads(output)
+            
+            # 파싱된 데이터가 리스트이고, 내부의 객체들이 'tool': 'update_schedule'을 포함하는지 확인
+            if isinstance(data, list) and data:
+                # 모든 항목이 update_schedule 결과인지 확인 (더 엄격한 체크)
+                is_update_schedule_result = all(
+                    isinstance(item, dict) and item.get('tool') == 'update_schedule'
+                    for item in data
+                )
+                
+                if is_update_schedule_result:
+                    # 여러 일정이 동시에 수정될 경우를 대비해 모든 메시지를 합침
+                    messages = [item.get('data', {}).get('message', '') for item in data]
+                    # 빈 메시지 필터링
+                    final_message = ' '.join(msg for msg in messages if msg)
+                    return final_message if final_message else "일정이 수정되었지만, 상세 메시지를 찾을 수 없습니다."
+
+        except (json.JSONDecodeError, TypeError):
+            # output이 JSON이 아니면, 그대로 반환
+            pass
+
+        return output
+        
     # 에이전트 실행의 마지막 안전망으로, 모든 예외를 처리하여 서버가 중단되지 않게 함.
     except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"에이전트 실행 중 오류 발생: {e}")
         return "죄송합니다, 요청을 처리하는 중에 예상치 못한 오류가 발생했습니다. 질문을 조금 더 구체적으로 바꿔서 다시 시도해 주시겠어요?"
+
